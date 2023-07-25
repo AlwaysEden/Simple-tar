@@ -5,6 +5,8 @@
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
+#include <libgen.h>
+
 
 typedef enum {
   archive = 0,
@@ -30,32 +32,38 @@ get_op_code (char * s)
 	return N_op;
 }
 
+void _make_dir(char * path){
+  struct stat dircheck;
+  if(strcmp(path, ".") == 0)
+    return;
+  if(stat(path, &dircheck) == 0)
+    return;
+
+  char * pathcopy = strdup(path);
+  char * parentpath = dirname(pathcopy);
+
+  _make_dir(parentpath);
+  mkdir(pathcopy, 0755);
+
+  free(pathcopy);
+}
+
 
 void makedir(char * path){
-  char * filename = strrchr(path, '/');
-  char * new_path = (char*)malloc(strlen(path));
-  strncpy(new_path, path, strlen(path) - strlen(filename));
+  
+  char * pathcopy = strdup(path);
+  char * dirpath = dirname(pathcopy);
+  _make_dir(dirpath);
 
-  char * delim = "/";
-  char * token = strtok(new_path, delim);
-  char * dirpath = (char *)malloc(strlen(new_path)+1);
-
-  while(token != NULL){
-    token = strtok(NULL, delim);
-    sprintf(dirpath, "%s/%s", dirpath, token);
-    printf("%s", dirpath);
-    mkdir(dirpath, 755);
-  }
-  free(new_path);
-  free(dirpath);
+  free(pathcopy);
 }
 
 void archivefiles(char * arc_filepath, char * src_path){
-  DIR * dp;
-  struct dirent *entry;
+  
+  struct dirent * entry;
   struct stat buffer;
-  int status;
 
+  DIR * dp;
   if((dp = opendir(src_path)) == NULL){
     fprintf(stderr,"Error: Open the directory %s\n",src_path);
     exit(EXIT_FAILURE);
@@ -63,11 +71,10 @@ void archivefiles(char * arc_filepath, char * src_path){
 
   while( (entry = readdir(dp)) != NULL){
 
-    char *new_filepath = malloc(strlen(src_path) + 1 + strlen(entry->d_name)+1);
-    strcat(new_filepath, src_path);
-    strcat(new_filepath, "/");
-    strcat(new_filepath, entry->d_name);
+    char * new_filepath = malloc(strlen(src_path) + 1 + strlen(entry->d_name) + 1);
+    sprintf(new_filepath, "%s/%s", src_path, entry->d_name);
 
+    int status;
     if( (status = stat(new_filepath, &buffer)) == -1){
       fprintf(stderr, "Error: 1stat() faild%s\n",new_filepath);
       exit(EXIT_FAILURE);
@@ -75,27 +82,18 @@ void archivefiles(char * arc_filepath, char * src_path){
 
     if(!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..") || (buffer.st_mode & S_IFMT) == S_IFLNK) continue;
 
-  
-    if((buffer.st_mode & S_IFMT) == S_IFDIR){
-      archivefiles(arc_filepath, new_filepath);
-    }else if((buffer.st_mode & S_IFMT) == S_IFREG){
+    if((buffer.st_mode & S_IFMT) == S_IFREG){
       FILE * src_fd = fopen(new_filepath, "rb");
       FILE * des_fd = fopen(arc_filepath, "ab");
       if(src_fd == NULL || des_fd == NULL){
         fprintf(stderr,"Error: Impossible path: %s and %s\n", new_filepath, arc_filepath);
         exit(EXIT_FAILURE);
       }
-      //파일 이름 길이를 아이노드에서 발견할 수 있도록 array copy
-      /*
-        1. The length of file path.
-        2. A String of file path.
-        3. The size of file data.
-      */
+
       int pathlength = strlen(new_filepath);
       fwrite((void *)&pathlength, 1, sizeof(unsigned int), des_fd);
       fwrite(new_filepath, 1, pathlength, des_fd);
       fwrite((void *)&buffer.st_size, 1, sizeof(unsigned int), des_fd);
-
 
       char content[512];
       size_t read_check;
@@ -110,10 +108,10 @@ void archivefiles(char * arc_filepath, char * src_path){
           written_acc += written ;
         }
       }
-      // chmod(arc_filepath, buffer.st_mode);
       fclose(src_fd);
       fclose(des_fd);
-      printf("%s\n", new_filepath);
+    }else if((buffer.st_mode & S_IFMT) == S_IFDIR){
+      archivefiles(arc_filepath, new_filepath);
     }
     free(new_filepath);
   }
@@ -121,20 +119,20 @@ void archivefiles(char * arc_filepath, char * src_path){
   closedir(dp);
 }
 
-
 void listfile(char * arh_path){
   FILE * fd = fopen(arh_path, "r");
 
   size_t read_check;
   int buffer;
   while( (read_check = fread(&buffer, 1, 4, fd))){
-    char filepath[buffer];
+    char * filepath = (char *)malloc(buffer + 1);
     read_check = fread(filepath, 1, buffer, fd);
     if(read_check != buffer){
       fprintf(stderr, "Error: Read file");
       exit(EXIT_FAILURE);
     }
     printf("%s\n", filepath);
+    free(filepath);
 
     int filesize;
     read_check = fread(&filesize, 1, 4, fd);
@@ -143,74 +141,83 @@ void listfile(char * arh_path){
       exit(EXIT_FAILURE);
     }
 
-    char filecontent[filesize];
+    char * filecontent = (char *)malloc(filesize + 1);
     read_check = fread(filecontent, 1, filesize, fd);
+    free(filecontent);
   }
+  fclose(fd);
 }
 
-
 void extract_arh(char * arc_filename){
-  DIR * srcdir;
-  DIR * desdir;
 
-  struct dirent *entry;
-  struct stat src_buffer;
-  struct stat des_buffer;
-  int status;
-
-  /*
-    파일을 4바이트 읽고, 그 다음 4바이트가 가르키는 정수의 길이 만큼 읽고, 그 다음 4바이트만큼 읽고, 그 다음 4바이크가 가르키는 파일 사이즈만큼 데이터를 읽으면 한 파일을 읽는 건 끝. 이걸 파일 끝날때마다 계속.
-  */
-  FILE * arc = fopen(arc_filename, "r+");
-  if(arc == NULL){
+  FILE * read_fd = fopen(arc_filename, "r+");
+  if(read_fd == NULL){
     fprintf(stderr, "Error: Open archive file");
     exit(EXIT_FAILURE);
   }
 
   size_t read_check;
   int pathlength;
-  while( (read_check = fread(&pathlength, 1, 4, arc) )){
+  while( (read_check = fread(&pathlength, 1, 4, read_fd) )){
     if(read_check != 4){
-      fprintf(stderr, "Error: Read the file");
+      fprintf(stderr, "Error: Read the pathlength of file.");
+      exit(EXIT_FAILURE);
     }
     
-    // printf("%d ", pathlength); 
 
-    char * filepath = (char *)malloc(pathlength);
-    read_check = fread(filepath, 1, pathlength, arc);
+    char * filepath = (char *)malloc(pathlength + 1);
+    read_check = fread(filepath, 1, pathlength, read_fd);
     if(read_check != pathlength){
-      fprintf(stderr, "Error: Read the file");
+      fprintf(stderr, "Error: Read the filepath");
+      exit(EXIT_FAILURE);
     }
-
-    // printf("%s ", filepath);
-
-    int filesize;
-    read_check = fread(&filesize, 1, 4, arc);
-    if(read_check != 4){
-      fprintf(stderr, "Error: Read the file");
-    }
-    // printf("%d ", filesize);
 
     makedir(filepath);
-    // FILE * createfile = fopen(filepath, "w+");
 
-    char * filedata = (char *)malloc(filesize);
-    fread(filedata, 1, filesize, arc);
-    // printf("%s\n",filedata);
-    //file사이즈가 겁나 클 수도 있는데 이걸 막 할당해준다? 읽으면서 점차적으로 할당해주는 건 어때
+    int filesize;
+    read_check = fread(&filesize, 1, 4, read_fd);
+    if(read_check != 4){
+      fprintf(stderr, "Error: Read the filesize");
+      exit(EXIT_FAILURE);
+    }
+
+      
+    FILE * write_fd = fopen(filepath,"w+");
+    char filedata[512];
+    int read_size = filesize < 512 ? filesize : 512;
+    int read_count = filesize < 512 ? 1: filesize/512 + 1;
+    for(int i = 0; i < read_count; i++){
+      read_check = fread(filedata, 1, read_size, read_fd);
+      if(read_check != read_size || filesize == 0){
+        break;
+      }
+      char * towrite = filedata ;
+      size_t written_acc = 0, written = 0 ;
+      for (written_acc = 0 ; written_acc < read_check ; written_acc += written) {
+        if ( (written = fwrite(towrite, 1, read_check -  written_acc, write_fd)) ) {
+          break ;
+        }
+        towrite += written ;
+        written_acc += written ;
+      }
+      filesize -= read_size;
+      if(filesize < read_size){
+        read_size = filesize;
+      }
+    }
+    free(filepath);
+    fclose(write_fd);
   }
-
+  fclose(read_fd);
 
 }
 
 int main(int argc, char * args[]){
   int op;
-  // copyfiles(args[1], args[2]);
-  // recursionDir("./num1/num2");
-  args[1] = "list";
-  args[2] = "ach";
-  args[3] = "./num1/num2";
+  args[1] = "extract";
+  args[2] = "achfile";
   switch(op = get_op_code(args[1])){
+
     case archive:
       archivefiles(args[2], args[3]);
       break;
@@ -220,6 +227,8 @@ int main(int argc, char * args[]){
     case extract:
       extract_arh(args[2]);
       break;
+    default:
+      printf("No command.\n");
   }
 
 }
